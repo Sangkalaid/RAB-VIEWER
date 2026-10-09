@@ -1,0 +1,25 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+!.env.staging.example
+api/google-apps-script/.clasp.json
+.clasprc.json
+
+# Local/generated trial artifacts
+FINAL-APP/
+RAB_VIEWER_AUDIT_LABELS_LIVE.json
+RAB_VIEWER_STAGING_INTEGRATION_TEST.latest.json
+staging-*.json
+.env.trial.staging
+
+# Build outputs
+src-tauri/target/
+target/
+*.pdb
+*.exe
+*.msi

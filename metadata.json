@@ -1,0 +1,8 @@
+{
+  "name": "RAB VIEWER",
+  "description": "Aplikasi desktop compact untuk mencari, menampilkan, membandingkan, dan mengelola database harga satuan pekerjaan dan AHSP.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
