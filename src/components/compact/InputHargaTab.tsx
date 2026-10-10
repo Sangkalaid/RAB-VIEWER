@@ -4,8 +4,11 @@ import { useRabApp } from '../../context/RabAppContext';
 import { rabDb } from '../../db/rabDatabase';
 import { ComponentType, SourceType, ComponentItem } from '../../types/rab';
 import { formatRupiah, parseRupiahInput } from '../../utils/currency';
+import { InputFlowHeader } from './InputFlowHeader';
+import { useDiscardConfirmation } from './useDiscardConfirmation';
 
 export const InputHargaTab: React.FC = () => {
+  const { requestDiscard, discardDialog } = useDiscardConfirmation();
   const {
     regions,
     units,
@@ -29,6 +32,8 @@ export const InputHargaTab: React.FC = () => {
   const [priceSearchQuery, setPriceSearchQuery] = useState<string>('');
   const [submittedPriceSearchQuery, setSubmittedPriceSearchQuery] = useState<string>('');
   const [referenceSearchQuery, setReferenceSearchQuery] = useState<string>('');
+  const [copiedReference, setCopiedReference] = useState('');
+  const submitLock = useRef(false);
 
   // Selected existing component ID for updating existing master data (null = input baru)
   const [selectedComponentId, setSelectedComponentId] = useState<string | null>(null);
@@ -37,7 +42,7 @@ export const InputHargaTab: React.FC = () => {
   // Form State
   const [componentName, setComponentName] = useState<string>('');
   const [brand, setBrand] = useState<string>('');
-  const [unit, setUnit] = useState<string>('kg');
+  const [unit, setUnit] = useState<string>('');
   const [source, setSource] = useState<string>('');
   const [sourceType, setSourceType] = useState<SourceType>('RESMI');
   const [year, setYear] = useState<number>(2026);
@@ -116,7 +121,10 @@ export const InputHargaTab: React.FC = () => {
   }, [selectedComponentId, year, regions]);
 
   // Auto-set standard unit when switching sub-tab
-  const handleTypeChange = (type: ComponentType) => {
+  const handleTypeChange = (type: ComponentType, confirmed = false) => {
+    if (submitLock.current) return;
+    if (viewMode === 'form' && !confirmed) { requestDiscard(() => handleTypeChange(type, true)); return; }
+    setCopiedReference('');
     setActiveType(type);
     setViewMode('list');
     setPriceSearchQuery('');
@@ -132,10 +140,13 @@ export const InputHargaTab: React.FC = () => {
     setIsBrandComboboxOpen(false);
     if (type === 'tenaga') setUnit('OH');
     else if (type === 'alat') setUnit('hari');
-    else setUnit('kg');
+    else setUnit('');
   };
 
   const handleSelectExistingComponent = (comp: ComponentItem) => {
+    setCopiedReference('');
+    setSource('');
+    setNotes('');
     setViewMode('form');
     setSelectedComponentId(comp.id);
     setParentComponentForVariant(null);
@@ -152,6 +163,7 @@ export const InputHargaTab: React.FC = () => {
   };
 
   const handleSwitchToNewInput = () => {
+    setCopiedReference('');
     setViewMode('form');
     setSelectedComponentId(null);
     setParentComponentForVariant(null);
@@ -163,7 +175,7 @@ export const InputHargaTab: React.FC = () => {
     setNotes('');
     if (activeType === 'tenaga') setUnit('OH');
     else if (activeType === 'alat') setUnit('hari');
-    else setUnit('kg');
+    else setUnit('');
     setIsComboboxOpen(false);
     setIsBrandComboboxOpen(false);
     setReferenceSearchQuery('');
@@ -174,10 +186,11 @@ export const InputHargaTab: React.FC = () => {
   };
 
   const handleAddVariantForComponent = (comp: ComponentItem) => {
+    setCopiedReference('');
     setViewMode('form');
     setSelectedComponentId(null);
     setParentComponentForVariant(comp);
-    setComponentName('');
+    setComponentName(comp.name);
     setUnit(comp.unit);
     setBrand('');
     setSource('');
@@ -190,11 +203,14 @@ export const InputHargaTab: React.FC = () => {
     setIsCustomBrandMode(true);
     showToast(`Tambah merek/varian baru untuk kode ${comp.componentCode || comp.name}`, 'info');
     setTimeout(() => {
-      nameInputRef.current?.focus();
+      brandInputRef.current?.focus();
     }, 50);
   };
 
-  const handleCancelForm = () => {
+  const handleCancelForm = (confirmed = false) => {
+    if (submitLock.current) return;
+    if (!confirmed) { requestDiscard(() => handleCancelForm(true)); return; }
+    setCopiedReference('');
     setViewMode('list');
     setSelectedComponentId(null);
     setParentComponentForVariant(null);
@@ -207,7 +223,7 @@ export const InputHargaTab: React.FC = () => {
     setReferenceSearchQuery('');
     if (activeType === 'tenaga') setUnit('OH');
     else if (activeType === 'alat') setUnit('hari');
-    else setUnit('kg');
+    else setUnit('');
     setIsComboboxOpen(false);
     setIsBrandComboboxOpen(false);
     setIsCustomBrandMode(false);
@@ -224,35 +240,10 @@ export const InputHargaTab: React.FC = () => {
       return;
     }
 
-    if (componentName.trim()) {
-      const comp = rabDb.findComponentByNameAndBrand(componentName.trim(), cleanBrand, activeType);
-      if (comp) {
-        setSelectedComponentId(comp.id);
-        setUnit(comp.unit);
-        loadPricesForComponent(comp.id, year);
-        showToast(`Memuat harga "${comp.name}" [Merek: ${cleanBrand}]`, 'info');
-      } else {
-        setSelectedComponentId(null);
-      }
-    }
   };
 
   const handleBrandInputChange = (val: string) => {
     setBrand(val);
-    if (selectedComponentId || parentComponentForVariant) {
-      return;
-    }
-    const cleanBrand = val.trim() || 'Non Merek';
-    if (componentName.trim()) {
-      const comp = rabDb.findComponentByNameAndBrand(componentName.trim(), cleanBrand, activeType);
-      if (comp) {
-        setSelectedComponentId(comp.id);
-        setUnit(comp.unit);
-        loadPricesForComponent(comp.id, year);
-      } else {
-        setSelectedComponentId(null);
-      }
-    }
   };
 
   const handlePriceChange = (regId: string, val: string) => {
@@ -296,10 +287,12 @@ export const InputHargaTab: React.FC = () => {
     showToast(`Hapus data "${component.name}" belum diaktifkan karena endpoint delete MRV belum tersedia. Data production tidak diubah.`, 'warning');
   };
 
-  const handleUseReferenceData = (component: ComponentItem) => {
+  const handleUseReferenceData = (component: ComponentItem, confirmed = false) => {
+    if ((componentName || brand || source || Object.keys(regionalPricesMap).length) && !confirmed) { requestDiscard(() => handleUseReferenceData(component, true)); return; }
+    setCopiedReference(component.name);
     const componentBrand = component.brand?.trim() || 'Non Merek';
     setSelectedComponentId(null);
-    setComponentName(component.name);
+    setComponentName('');
     setUnit(component.unit);
     setBrand(componentBrand);
     setSource('');
@@ -485,10 +478,10 @@ export const InputHargaTab: React.FC = () => {
       ? 'Tambah Merek / Varian'
       : 'Buat Komponen Baru';
   const formModeDescription = formMode === 'edit_variant'
-    ? 'Perubahan akan mengganti baris varian existing berdasarkan ID VARIAN. Kode komponen dan ID varian tidak berubah.'
+    ? 'Ubah merek dan harga pada varian yang dipilih. Nama serta satuan induk mengikuti master komponen.'
     : formMode === 'add_variant'
-      ? 'Varian baru memakai kode induk yang sama. ID varian dibuat otomatis oleh backend saat disimpan.'
-      : 'Gunakan hanya untuk material/jasa/alat yang belum memiliki komponen induk. Kode komponen dan ID varian dibuat otomatis oleh backend.';
+      ? 'Isi merek baru dan harga daerah untuk komponen induk ini. Periksa kembali merek sebelum menyimpan.'
+      : 'Isi komponen yang belum terdaftar beserta merek pertama dan harga daerah. Untuk merek lain dari komponen existing, gunakan Tambah Merek pada hasil pencarian.';
   const currentComponentCode = selectedComponent?.componentCode || parentComponentForVariant?.componentCode || 'Dibuat otomatis';
   const currentVariantId = selectedComponent?.variantId || (parentComponentForVariant ? 'Dibuat otomatis' : 'Dibuat otomatis');
   const hasActiveFormIdentity = Boolean(componentName.trim() || selectedComponentId || parentComponentForVariant);
@@ -513,7 +506,7 @@ export const InputHargaTab: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting) return;
+    if (submitLock.current) return;
 
     const trimmedName = componentName.trim();
     if (!trimmedName) {
@@ -524,6 +517,10 @@ export const InputHargaTab: React.FC = () => {
 
     // Default empty brand to 'Non Merek' as requested
     const finalBrand = brand.trim() ? brand.trim() : 'Non Merek';
+    if (!unit.trim()) {
+      showToast('Pilih satuan komponen sebelum menyimpan.', 'error');
+      return;
+    }
 
     // Collect valid prices
     const validEntries: { regionId: string; price: number }[] = [];
@@ -546,8 +543,15 @@ export const InputHargaTab: React.FC = () => {
       setIsSubmitting(true);
       const existingExact = rabDb.findComponentByNameAndBrand(trimmedName, finalBrand, activeType);
       const isAddingVariant = Boolean(parentComponentForVariant && !selectedComponentId);
-      const isUpdating = !isAddingVariant && Boolean(selectedComponentId || existingExact);
-      const existingForSave = selectedComponentId ? rabDb.getComponentById(selectedComponentId) : isAddingVariant ? parentComponentForVariant : existingExact;
+      const isUpdating = Boolean(selectedComponentId);
+      const existingForSave = selectedComponentId ? rabDb.getComponentById(selectedComponentId) : parentComponentForVariant;
+      if (!isUpdating && !isAddingVariant && existingComponentsOfThisType.some(c => c.name.trim().toLowerCase() === trimmedName.toLowerCase())) {
+        throw new Error('Komponen ini sudah terdaftar. Kembali ke pencarian lalu pilih Edit atau Tambah Merek.');
+      }
+      if (isUpdating && !existingForSave) throw new Error('Data edit tidak tersedia. Kembali ke pencarian dan pilih ulang.');
+      if (isAddingVariant && !brand.trim()) throw new Error('Isi nama merek yang ingin ditambahkan.');
+      if (existingExact && existingExact.id !== selectedComponentId) throw new Error('Merek ini sudah terdaftar. Gunakan Edit pada varian tersebut.');
+      submitLock.current = true;
       await saveHarga({
         type: activeType,
         componentCode: existingForSave?.componentCode,
@@ -600,6 +604,7 @@ export const InputHargaTab: React.FC = () => {
       const msg = err instanceof Error ? err.message : 'Gagal menyimpan harga';
       showToast(msg, 'error');
     } finally {
+      submitLock.current = false;
       setIsSubmitting(false);
     }
   };
@@ -872,30 +877,8 @@ export const InputHargaTab: React.FC = () => {
         </>
       ) : (
       <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-3.5 space-y-3.5 text-xs">
-        {parentComponentForVariant && (
-          <section className={`rounded-xl border p-3.5 space-y-2 ${
-            isDark ? 'bg-blue-950/20 border-blue-500/20' : 'bg-blue-50 border-blue-200'
-          }`}>
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5">
-                <Plus className="w-3.5 h-3.5 text-blue-500" />
-                <span className="text-[11px] font-bold uppercase tracking-wide text-slate-800 dark:text-slate-200">
-                  Tambah Merek / Varian
-                </span>
-              </div>
-              <span className="px-2 py-0.5 rounded-full bg-white/70 dark:bg-white/10 text-blue-700 dark:text-blue-300 text-[10px] font-semibold">
-                {parentComponentForVariant.componentCode}
-              </span>
-            </div>
-            <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
-              Varian baru akan memakai kode induk yang sama. ID varian baru dialokasikan backend saat simpan, tanpa membuat AHSP baru.
-            </p>
-            <div className="text-[11px] font-semibold text-slate-700 dark:text-slate-200">
-              Induk: {parentComponentForVariant.name} · Satuan: {parentComponentForVariant.unit}
-            </div>
-          </section>
-        )}
-
+        <fieldset disabled={isSubmitting} className="min-w-0 space-y-3.5">
+        <InputFlowHeader title={formModeTitle} description={formModeDescription} editing={formMode === 'edit_variant'} reference={copiedReference} />
         {!selectedComponentId && !parentComponentForVariant && (
           <section className={`rounded-xl border p-3.5 space-y-3 ${
             isDark ? 'bg-[#1A1A1A] border-white/10' : 'bg-white border-slate-200 shadow-2xs'
@@ -910,12 +893,13 @@ export const InputHargaTab: React.FC = () => {
               <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400">Opsional</span>
             </div>
             <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-              Cari data yang sudah ada untuk menduplikasi struktur nama, merek, satuan, dan harga daerah. Jika tidak dipakai, form tetap kosong sesuai input baru.
+              Salin merek, satuan, sumber, dan harga sebagai titik awal. Nama komponen baru harus diisi sendiri. Data referensi tetap tersimpan sebagai data terpisah.
             </p>
             <div className="relative flex items-center">
               <input
                 type="text"
                 value={referenceSearchQuery}
+                onKeyDown={e => { if (e.key === 'Enter') e.preventDefault(); }}
                 onChange={(e) => setReferenceSearchQuery(e.target.value)}
                 placeholder="Cari referensi dari data yang sudah ada..."
                 style={{ paddingLeft: '2.75rem' }}
@@ -964,7 +948,7 @@ export const InputHargaTab: React.FC = () => {
             <div className="flex items-center gap-1.5">
               <Tag className="w-3.5 h-3.5 text-blue-500" />
               <span className="text-[11px] font-bold uppercase tracking-wide text-slate-800 dark:text-slate-200">
-                {formModeTitle}
+                Identitas Komponen
               </span>
             </div>
             {selectedComponentId && (
@@ -986,9 +970,6 @@ export const InputHargaTab: React.FC = () => {
           <div className={`rounded-lg border p-2.5 space-y-2 ${
             isDark ? 'bg-[#151515] border-white/10' : 'bg-slate-50 border-slate-200'
           }`}>
-            <p className="text-[11px] leading-relaxed text-slate-600 dark:text-slate-300">
-              {formModeDescription}
-            </p>
             <div className="grid grid-cols-2 gap-2">
               <div className={`rounded-lg px-2.5 py-2 ${
                 isDark ? 'bg-white/5' : 'bg-white border border-slate-200'
@@ -1029,6 +1010,8 @@ export const InputHargaTab: React.FC = () => {
               type="text"
               required
               value={componentName}
+              readOnly={formMode !== 'new_component'}
+              aria-label="Nama komponen induk"
               onFocus={() => {
                 setIsComboboxOpen(false);
               }}
@@ -1087,68 +1070,6 @@ export const InputHargaTab: React.FC = () => {
 
           </div>
 
-          {/* DROPDOWN LIST OF RECORDED DATA */}
-          {false && selectedComponentId && isComboboxOpen && existingComponentsOfThisType.length > 0 && (
-            <div className={`absolute left-0 right-0 top-full mt-1 max-h-56 overflow-y-auto rounded-md border shadow-2xl z-50 p-1 text-xs animate-in fade-in zoom-in-95 duration-100 ${
-              isDark ? 'bg-[#202020] border-white/10 text-white' : 'bg-white border-slate-200 text-slate-800'
-            }`}>
-              <div className="text-[10px] font-semibold uppercase font-mono text-slate-400 px-2 py-1 border-b border-white/10 flex items-center justify-between">
-                <span>Pilih untuk Update Data Eksisting:</span>
-                <span className="text-[9px] opacity-75">{filteredComponents.length} Data</span>
-              </div>
-
-              <div className="space-y-0.5 mt-1">
-                {filteredComponents.length > 0 ? (
-                  filteredComponents.map((c) => {
-                    const isSelected = selectedComponentId === c.id;
-                    const brandDisplay = c.brand?.trim() || 'Non Merek';
-                    return (
-                      <div
-                        key={c.id}
-                        onClick={() => handleSelectExistingComponent(c)}
-                        className={`px-2.5 py-1.5 rounded cursor-pointer transition-colors flex items-center justify-between text-xs ${
-                          isSelected
-                            ? isDark ? 'bg-blue-600 text-white font-bold' : 'bg-blue-50 text-blue-700 font-bold border border-blue-200'
-                            : isDark ? 'hover:bg-white/10 text-slate-200' : 'hover:bg-slate-100 text-slate-800'
-                        }`}
-                      >
-                        <div className="truncate min-w-0 pr-2">
-                          <span className="font-semibold">{c.name}</span>
-                          <span className="text-[10px] text-blue-500 dark:text-blue-400 ml-1.5 font-mono">
-                            [{brandDisplay}]
-                          </span>
-                        </div>
-
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          {isSelected ? (
-                            <span className="text-[9px] font-mono font-bold uppercase px-1 py-0.2 rounded bg-blue-500/30 text-blue-400">
-                              Terpilih
-                            </span>
-                          ) : (
-                            <span className="text-[9px] font-mono opacity-60 text-slate-400">
-                              Pilih
-                            </span>
-                          )}
-
-                          <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded ${
-                            isSelected
-                              ? 'bg-blue-500/30 text-blue-200'
-                              : isDark ? 'bg-white/5 text-slate-400' : 'bg-slate-100 text-slate-600'
-                          }`}>
-                            {c.unit}
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div className="p-3 text-center text-slate-400 text-[11px] italic font-mono">
-                    Tidak ada nama yang cocok. Teks yang Anda ketik akan disimpan sebagai data baru.
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
         </div>
 
         {/* 2. MEREK / BRAND (DIBAWAH NAMA MATERIAL DENGAN DROPDOWN OTOMATIS & NON MEREK) */}
@@ -1157,82 +1078,18 @@ export const InputHargaTab: React.FC = () => {
             Merek / Brand
           </label>
 
-          {/* JIKA MODE INPUT MANUAL MEREK BARU */}
-          {hasActiveFormIdentity && isCustomBrandMode ? (
-            <div className="relative flex items-center">
-              <Tag className="w-3.5 h-3.5 absolute left-4 text-slate-400 pointer-events-none" />
-              <input
-                ref={brandInputRef}
-                type="text"
-                value={brand}
-                onChange={(e) => handleBrandInputChange(e.target.value)}
-                placeholder="Ketik nama merek (kosong = otomatis Non Merek)..."
-                style={{ paddingLeft: '2.75rem' }}
-                className={`w-full h-9 pl-3 pr-14 text-xs font-semibold rounded-lg border transition-colors focus:outline-none ${
-                  isDark
-                    ? 'bg-[#1A1A1A] border-blue-500 text-white focus:ring-1 focus:ring-blue-500'
-                    : 'bg-white border-blue-600 text-slate-900 focus:ring-1 focus:ring-blue-600'
-                }`}
-              />
-              <button
-                type="button"
-                onClick={() => {
-                  setIsCustomBrandMode(false);
-                  setBrand(firstAvailableBrandForCurrentComponent());
-                }}
-                className="absolute right-2 text-[10px] font-mono text-rose-500 hover:underline cursor-pointer"
-              >
-                Batal
-              </button>
-            </div>
-          ) : (
-            /* DROPDOWN SELECT MEREK (BERLAKU UNTUK INPUT BARU MAUPUN MATERIAL EKSISTING) */
-            <div className="relative flex items-center">
-              <Tag className="w-3.5 h-3.5 absolute left-4 text-slate-400 pointer-events-none" />
-              <select
-                disabled={!hasActiveFormIdentity}
-                value={availableBrandsForCurrentComponent.includes(brand.trim() || 'Non Merek') ? (brand.trim() || 'Non Merek') : firstAvailableBrandForCurrentComponent()}
-                onChange={(e) => {
-                  if (e.target.value === '__add_new__') {
-                    setIsCustomBrandMode(true);
-                    setBrand('');
-                    setTimeout(() => brandInputRef.current?.focus(), 50);
-                  } else {
-                    handleSelectBrand(e.target.value);
-                  }
-                }}
-                style={{ paddingLeft: '2.75rem' }}
-                className={`w-full h-9 pl-3 pr-8 text-xs font-semibold rounded-lg border transition-colors appearance-none ${
-                  !hasActiveFormIdentity
-                    ? isDark
-                      ? 'bg-[#141414] border-white/5 text-slate-500 cursor-not-allowed opacity-60'
-                      : 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed opacity-75'
-                    : isDark
-                      ? 'bg-[#1A1A1A] border-[#333333] text-white cursor-pointer focus:border-blue-500'
-                      : 'bg-white border-slate-300 text-slate-900 cursor-pointer focus:border-blue-600'
-                }`}
-              >
-                {!hasActiveFormIdentity ? (
-                  <option value="">(isi nama material terlebih dahulu)</option>
-                ) : (
-                  <>
-                    {availableBrandsForCurrentComponent.map((b) => (
-                      <option key={b} value={b} className={isDark ? 'bg-[#202020] text-white' : 'bg-white text-slate-900'}>
-                        {b === 'Non Merek' ? 'Non Merek (Standar)' : b}
-                      </option>
-                    ))}
-                    <option value="__add_new__" className={isDark ? 'bg-[#202020] text-blue-400 font-bold' : 'bg-white text-blue-600 font-bold'}>
-                      + Tambah Merek Baru...
-                    </option>
-                  </>
-                )}
-              </select>
-
-              <div className="absolute right-2.5 pointer-events-none text-slate-400">
-                <ChevronDown className="w-3.5 h-3.5" />
-              </div>
-            </div>
-          )}
+          <div className="relative flex items-center">
+            <Tag className="w-3.5 h-3.5 absolute left-4 text-slate-400 pointer-events-none" />
+            <input ref={brandInputRef} type="text" aria-label="Merek / Brand"
+              required={formMode === 'add_variant'} value={brand}
+              onChange={e => setBrand(e.target.value)}
+              placeholder={formMode === 'add_variant' ? 'Masukkan merek baru...' : 'Kosongkan jika tanpa merek'}
+              style={{ paddingLeft: '2.75rem' }}
+              className="w-full h-9 pr-3 text-xs rounded-lg border border-slate-300 bg-white text-slate-800 focus:outline-none focus:border-blue-600 dark:bg-[#1A1A1A] dark:border-[#333333] dark:text-slate-100" />
+          </div>
+          <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+            {formMode === 'edit_variant' ? 'Mengganti merek di sini memperbarui varian yang sama. Untuk merek tambahan, gunakan Tambah Merek pada hasil pencarian.' : formMode === 'add_variant' ? 'Nama merek harus berbeda dari varian yang sudah terdaftar pada induk ini.' : 'Merek ini menjadi varian pertama komponen baru.'}
+          </p>
         </div>
 
         {/* 3. SATUAN & SUMBER */}
@@ -1246,6 +1103,7 @@ export const InputHargaTab: React.FC = () => {
               <select
                 required
                 value={unit}
+                disabled={formMode !== 'new_component'}
                 onChange={(e) => setUnit(e.target.value)}
                 className={`w-full h-9 pl-3 pr-8 text-xs font-semibold rounded-lg border cursor-pointer focus:outline-none transition-colors appearance-none ${
                   isDark
@@ -1253,7 +1111,8 @@ export const InputHargaTab: React.FC = () => {
                     : 'bg-white border-slate-300 text-slate-900 focus:border-blue-600'
                 }`}
               >
-                {unit && !units.some(u => u.name.toLowerCase() === unit.toLowerCase()) && (
+                <option value="" disabled>Pilih satuan...</option>
+                {unit && !units.some(u => u.name === unit) && (
                   <option value={unit} className={isDark ? 'bg-[#202020] text-white' : 'bg-white text-slate-900'}>
                     {unit}
                   </option>
@@ -1421,7 +1280,7 @@ export const InputHargaTab: React.FC = () => {
         )}
 
         {/* ACTION BUTTONS */}
-        <div className="grid grid-cols-[1fr_auto] gap-2">
+        <div className="sticky bottom-0 bg-white dark:bg-[#181818] border-t border-slate-200 dark:border-white/10 pt-3 pb-1 grid grid-cols-[1fr_auto] gap-2">
           <button
             type="submit"
             disabled={isSubmitting}
@@ -1454,14 +1313,16 @@ export const InputHargaTab: React.FC = () => {
           </button>
           <button
             type="button"
-            onClick={handleCancelForm}
+            onClick={() => handleCancelForm()}
             className="h-9 px-4 rounded-lg border border-slate-300 dark:border-white/15 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-white/10 text-xs font-semibold cursor-pointer transition-colors"
           >
             Batal
           </button>
         </div>
+        </fieldset>
       </form>
       )}
+      {discardDialog}
     </div>
   );
 };

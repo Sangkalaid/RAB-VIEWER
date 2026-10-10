@@ -3,6 +3,8 @@ import { Plus, Trash2, Save, ChevronDown, Check, RotateCcw, AlertTriangle, FileT
 import { useRabApp } from '../../context/RabAppContext';
 import { rabDb } from '../../db/rabDatabase';
 import { ComponentItem, AHSPComponentRef, ComponentType, AHSPItem } from '../../types/rab';
+import { InputFlowHeader } from './InputFlowHeader';
+import { useDiscardConfirmation } from './useDiscardConfirmation';
 
 interface SearchableComponentSelectProps {
   value: string;
@@ -191,6 +193,7 @@ const SearchableComponentSelect: React.FC<SearchableComponentSelectProps> = ({
 };
 
 export const InputAhspTab: React.FC = () => {
+  const { requestDiscard, discardDialog } = useDiscardConfirmation();
   const {
     categories,
     regions,
@@ -209,10 +212,14 @@ export const InputAhspTab: React.FC = () => {
   const isDark = settings.theme === 'dark';
 
   const initialDraft = useMemo(() => loadAhspDraft(), []);
+  const [editingTargetId, setEditingTargetId] = useState<string | null>(() => initialDraft?.editingAhspId || null);
+  const [copiedReference, setCopiedReference] = useState('');
+  const submitLock = useRef(false);
+  const isEditing = Boolean(editingAhsp || editingTargetId);
 
   const [name, setName] = useState(() => initialDraft?.name || '');
   const [categoryId, setCategoryId] = useState(() => initialDraft?.categoryId || 'cat_arsitektural');
-  const [unit, setUnit] = useState(() => initialDraft?.unit || 'm²');
+  const [unit, setUnit] = useState(() => initialDraft?.unit || '');
   const [code, setCode] = useState(() => initialDraft?.code || rabDb.getNextAhspCode(initialDraft?.categoryId || 'cat_arsitektural'));
   const [reference, setReference] = useState(() => initialDraft?.reference || '');
   const [year, setYear] = useState(() => initialDraft?.year || 2026);
@@ -225,6 +232,7 @@ export const InputAhspTab: React.FC = () => {
 
   // Handle changing category: auto-generate code based on category prefix (A.1, S.1, E.1, M.1, L.1)
   const handleCategoryChange = (newCatId: string) => {
+    if (isEditing) return;
     setCategoryId(newCatId);
     setCode(rabDb.getNextAhspCode(newCatId));
   };
@@ -259,7 +267,7 @@ export const InputAhspTab: React.FC = () => {
           year,
           notes,
           componentRefs,
-          editingAhspId: editingAhsp?.id || null
+          editingAhspId: editingAhsp?.id || editingTargetId || null
         };
         localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
       } catch (e) {
@@ -270,11 +278,12 @@ export const InputAhspTab: React.FC = () => {
         localStorage.removeItem(DRAFT_STORAGE_KEY);
       } catch (e) {}
     }
-  }, [hasContent, name, categoryId, unit, code, reference, year, notes, componentRefs, editingAhsp]);
+  }, [hasContent, name, categoryId, unit, code, reference, year, notes, componentRefs, editingAhsp, editingTargetId]);
 
   // Sync if editing or duplicating an AHSP
   useEffect(() => {
     if (editingAhsp) {
+      setEditingTargetId(editingAhsp.id);
       setViewMode('form');
       setName(editingAhsp.name);
       setCategoryId(editingAhsp.category_id);
@@ -318,6 +327,8 @@ export const InputAhspTab: React.FC = () => {
   }, [referenceAhspSearchQuery, allAhsps, categories, editingAhsp]);
 
   const fillFormFromAhsp = (ahsp: AHSPItem, mode: 'edit' | 'duplicate') => {
+    setEditingTargetId(mode === 'edit' ? ahsp.id : null);
+    setCopiedReference(mode === 'duplicate' ? ahsp.name : '');
     setName(mode === 'duplicate' ? `${ahsp.name} (Salinan)` : ahsp.name);
     setCategoryId(ahsp.category_id);
     setUnit(ahsp.unit);
@@ -339,7 +350,8 @@ export const InputAhspTab: React.FC = () => {
     fillFormFromAhsp(ahsp, 'edit');
   };
 
-  const handleDuplicateAhsp = (ahsp: AHSPItem) => {
+  const handleDuplicateAhsp = (ahsp: AHSPItem, confirmed = false) => {
+    if (viewMode === 'form' && hasContent && !confirmed) { requestDiscard(() => handleDuplicateAhsp(ahsp, true)); return; }
     fillFormFromAhsp(ahsp, 'duplicate');
     setReferenceAhspSearchQuery('');
     showToast(`Referensi "${ahsp.name}" dimuat sebagai AHSP baru`, 'info');
@@ -372,6 +384,8 @@ export const InputAhspTab: React.FC = () => {
   };
 
   const executeFormReset = () => {
+    setEditingTargetId(null);
+    setCopiedReference('');
     try {
       localStorage.removeItem(DRAFT_STORAGE_KEY);
     } catch (e) {}
@@ -379,7 +393,7 @@ export const InputAhspTab: React.FC = () => {
     setName('');
     setCategoryId('cat_arsitektural');
     setCode(rabDb.getNextAhspCode('cat_arsitektural'));
-    setUnit('m²');
+    setUnit('');
     setReference('');
     setNotes('');
     setComponentRefs([]);
@@ -387,7 +401,9 @@ export const InputAhspTab: React.FC = () => {
     setShowResetConfirm(false);
   };
 
-  const handleCancelForm = () => {
+  const handleCancelForm = (confirmed = false) => {
+    if (submitLock.current) return;
+    if (hasContent && !confirmed) { requestDiscard(() => handleCancelForm(true)); return; }
     executeFormReset();
     setViewMode('list');
     setAhspSearchQuery('');
@@ -404,7 +420,16 @@ export const InputAhspTab: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting) return;
+    if (submitLock.current) return;
+    const targetId = editingAhsp?.id || editingTargetId || undefined;
+    if (isEditing && !rabDb.getAHSPEntries().some(item => item.id === targetId && item.code === code)) {
+      showToast('Data asal edit belum tersedia atau kodenya berubah. Refresh lalu pilih ulang AHSP melalui pencarian.', 'error');
+      return;
+    }
+    if (!isEditing && rabDb.getAHSPEntries().some(item => item.code === code.trim())) {
+      showToast('Kode AHSP sudah digunakan. Pilih kategori kembali untuk mendapatkan kode baru.', 'error');
+      return;
+    }
 
     const trimmedName = name.trim();
     if (!trimmedName) {
@@ -416,13 +441,22 @@ export const InputAhspTab: React.FC = () => {
       return;
     }
     const validRefs = componentRefs.filter(r => r.component_id && r.component_id.trim() !== '');
+    if (validRefs.length !== componentRefs.length) {
+      showToast('Lengkapi komponen yang belum dipilih atau hapus baris kosongnya.', 'error');
+      return;
+    }
     if (validRefs.length === 0) {
       showToast('Tambahkan dan pilih minimal satu komponen analisa', 'error');
       return;
     }
     const duplicateKey = new Set<string>();
     for (const ref of validRefs) {
-      const key = `${ref.component_type}|${ref.component_id}`;
+      const component = rabDb.getComponentById(ref.component_id);
+      if (!component || !Number.isFinite(ref.coefficient) || ref.coefficient <= 0) {
+        showToast('Pilih komponen valid dan isi koefisien lebih dari nol pada setiap baris.', 'error');
+        return;
+      }
+      const key = `${ref.component_type}|${component.componentCode || ref.component_id}`;
       if (duplicateKey.has(key)) {
         showToast('Komponen AHSP duplikat. Hapus salah satu komponen yang sama sebelum menyimpan.', 'error');
         return;
@@ -431,6 +465,7 @@ export const InputAhspTab: React.FC = () => {
     }
 
     try {
+      submitLock.current = true;
       setIsSubmitting(true);
       await saveAHSP({
         name: trimmedName,
@@ -442,7 +477,7 @@ export const InputAhspTab: React.FC = () => {
         overhead_profit_pct: effectiveOverheadPct,
         components: validRefs,
         notes: notes.trim()
-      }, editingAhsp ? editingAhsp.id : undefined);
+      }, targetId);
 
       executeFormReset();
       setViewMode('list');
@@ -452,57 +487,13 @@ export const InputAhspTab: React.FC = () => {
       const msg = err instanceof Error ? err.message : 'Gagal menyimpan AHSP';
       showToast(msg, 'error');
     } finally {
+      submitLock.current = false;
       setIsSubmitting(false);
     }
   };
 
   return (
     <div className={`flex-1 flex flex-col min-h-0 ${isDark ? 'bg-[#181818] text-[#E4E4E4]' : 'bg-white text-slate-800'}`}>
-      {viewMode === 'form' && (
-      <div className={`px-4 py-2.5 border-b flex items-center justify-between shrink-0 ${
-        isDark ? 'bg-[#202020] border-white/10' : 'bg-[#F1F5F9] border-slate-200'
-      }`}>
-        <div>
-          <h2 className="text-xs font-bold uppercase font-mono tracking-wide flex items-center gap-2">
-            <span>{editingAhsp ? 'EDIT AHSP' : 'INPUT AHSP BARU'}</span>
-            {hasContent && !editingAhsp && (
-              <span className="text-[10px] text-emerald-500 font-mono font-normal normal-case flex items-center gap-0.5">
-                <Check className="w-3 h-3" /> Draft tersimpan
-              </span>
-            )}
-          </h2>
-          <p className="text-[10px] text-slate-400">
-            {editingAhsp ? `Mengubah data AHSP: [${editingAhsp.code || 'AHSP'}] ${editingAhsp.name}` : 'Analisa Harga Satuan Pekerjaan & Koefisien'}
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2">
-          {viewMode === 'form' && hasContent && (
-            <button
-              type="button"
-              onClick={handleRequestResetForm}
-              className="text-[10px] font-mono px-2 py-1 rounded border border-slate-300 dark:border-white/15 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-white/10 cursor-pointer flex items-center gap-1"
-              title="Kosongkan Form AHSP"
-            >
-              <RotateCcw className="w-3 h-3" />
-              <span>Reset</span>
-            </button>
-          )}
-
-          {viewMode === 'form' && editingAhsp && (
-            <button
-              type="button"
-              onClick={handleRequestResetForm}
-              className="text-[10px] font-mono font-bold px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white cursor-pointer shadow-2xs transition-colors"
-              title="Batal mode edit"
-            >
-              Batal
-            </button>
-          )}
-        </div>
-      </div>
-      )}
-
       {viewMode === 'list' ? (
         <>
           <div className={`p-3.5 border-b shrink-0 space-y-3 ${isDark ? 'bg-[#202020] border-white/10' : 'bg-[#F1F5F9] border-slate-200'}`}>
@@ -659,7 +650,7 @@ export const InputAhspTab: React.FC = () => {
                           className="h-7 px-2.5 rounded-lg border border-slate-300 dark:border-white/15 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-white/10 text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
                         >
                           <Copy className="w-3.5 h-3.5" />
-                          <span>Duplikat</span>
+                          <span>Buat dari Referensi</span>
                         </button>
                         <button
                           type="button"
@@ -680,7 +671,10 @@ export const InputAhspTab: React.FC = () => {
         </>
       ) : (
       <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-3.5 space-y-3.5 text-xs">
-        {!editingAhsp && (
+        <fieldset disabled={isSubmitting} className="min-w-0 space-y-3.5">
+        <InputFlowHeader title={isEditing ? 'Edit AHSP' : 'Buat AHSP Baru'} editing={isEditing} reference={copiedReference}
+          description={isEditing ? `Perbarui pekerjaan ${code}. Kode pekerjaan tetap; periksa komponen dan koefisien sebelum menyimpan.` : 'Buat pekerjaan dengan kode baru. Referensi opsional menyalin isian untuk diperiksa kembali sebelum disimpan.'} />
+        {!isEditing && (
           <section className={`rounded-xl border p-3.5 space-y-3 ${
             isDark ? 'bg-[#1A1A1A] border-white/10' : 'bg-white border-slate-200 shadow-2xs'
           }`}>
@@ -700,6 +694,7 @@ export const InputAhspTab: React.FC = () => {
               <input
                 type="text"
                 value={referenceAhspSearchQuery}
+                onKeyDown={e => { if (e.key === 'Enter') e.preventDefault(); }}
                 onChange={(e) => setReferenceAhspSearchQuery(e.target.value)}
                 placeholder="Cari referensi AHSP dari data yang sudah ada..."
                 style={{ paddingLeft: '2.75rem' }}
@@ -793,6 +788,7 @@ export const InputAhspTab: React.FC = () => {
             </label>
             <select
               value={categoryId}
+              disabled={isEditing}
               onChange={(e) => handleCategoryChange(e.target.value)}
               className={`w-full h-9 px-3 text-xs rounded-lg border focus:outline-none ${
                 isDark ? 'bg-[#1A1A1A] border-[#333333] text-white' : 'bg-white border-slate-300 text-slate-900'
@@ -815,6 +811,8 @@ export const InputAhspTab: React.FC = () => {
                 isDark ? 'bg-[#1A1A1A] border-[#333333] text-white' : 'bg-white border-slate-300 text-slate-900'
               }`}
             >
+              <option value="" disabled>Pilih satuan...</option>
+              {unit && !units.some(u => u.name === unit) && <option value={unit}>{unit}</option>}
               {units.map((u) => (
                 <option key={u.id} value={u.name}>
                   {u.name}
@@ -993,7 +991,7 @@ export const InputAhspTab: React.FC = () => {
         </section>
 
         {/* Save / Update Button */}
-        <div className="grid grid-cols-[1fr_auto] gap-2">
+        <div className="sticky bottom-0 bg-white dark:bg-[#181818] border-t border-slate-200 dark:border-white/10 pt-3 pb-1 grid grid-cols-[1fr_auto] gap-2">
           <button
             type="submit"
             disabled={isSubmitting}
@@ -1004,22 +1002,24 @@ export const InputAhspTab: React.FC = () => {
             <Save className="w-4 h-4" />
             <span>
               {isSubmitting 
-                ? (editingAhsp ? 'MEMPERBARUI...' : 'MENYIMPAN...') 
-                : (editingAhsp ? 'PERBARUI' : 'SIMPAN')
+                ? (isEditing ? 'MEMPERBARUI...' : 'MENYIMPAN...')
+                : (isEditing ? 'PERBARUI AHSP' : 'SIMPAN AHSP BARU')
               }
             </span>
           </button>
           <button
             type="button"
-            onClick={handleCancelForm}
+            onClick={() => handleCancelForm()}
             disabled={isSubmitting}
             className="h-9 px-4 rounded-lg border border-slate-300 dark:border-white/15 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-white/10 text-xs font-bold cursor-pointer transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
           >
             Batal
           </button>
         </div>
+        </fieldset>
       </form>
       )}
+      {discardDialog}
 
       {/* CONFIRMATION MODAL BEFORE RESETTING FORM */}
       {showResetConfirm && (
