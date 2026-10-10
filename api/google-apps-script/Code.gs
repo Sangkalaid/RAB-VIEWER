@@ -1,3 +1,12 @@
+
+function formatCoefficient_(val) {
+  if (val === null || val === undefined || val === '') return '0,0000';
+  const num = typeof val === 'number' ? val : parseFloat(String(val).replace(',', '.'));
+  if (isNaN(num)) return '0,0000';
+  const fixed = num.toFixed(4);
+  return fixed.replace('.', ',');
+}
+
 const SPREADSHEET_ID = '1zQj-rFSGyqe1VQtdqvNplxdRtrWeCfz9ra5dh_NANGw';
 const PRODUCTION_SPREADSHEET_ID = '1zQj-rFSGyqe1VQtdqvNplxdRtrWeCfz9ra5dh_NANGw';
 const EXECUTION_MODE = 'production'; // production | staging | testing
@@ -736,10 +745,15 @@ function createAhsp_(record) {
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   validateAhspReferences_(record, ss);
   const sheet = getRuntimeSheet_(ss, 'ahsp');
-  const rows = objects_(sheet);
   const code = text_(record.code);
-  if (rows.some((row) => text_(row['KODE AHSP']) === code)) throwApi_('DUPLICATE_AHSP_CODE', 'Kode AHSP ' + code + ' sudah tersedia. Gunakan Update untuk mengubah data.', { code: code }, 409);
-  appendAhspRows_(sheet, record);
+  
+  // Check if code exists in grouped AHSP
+  const existingGrouped = groupedAhspObjects_(sheet);
+  if (existingGrouped.some((r) => text_(r['KODE AHSP']) === code)) {
+    throwApi_('DUPLICATE_AHSP_CODE', 'Kode AHSP ' + code + ' sudah tersedia. Gunakan Update untuk mengubah data.', { code: code }, 409);
+  }
+  
+  appendGroupedAhspBlock_(sheet, record, ss);
   SpreadsheetApp.flush();
   verifyAhspCreate_(sheet, code, record.components.length);
 }
@@ -749,6 +763,20 @@ function updateAhsp_(record) {
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   validateAhspReferences_(record, ss);
   const sheet = getRuntimeSheet_(ss, 'ahsp');
+  const code = text_(record.code);
+  
+  const isGrouped = !hasCanonicalAhspRows_(objects_(sheet)) && groupedAhspObjects_(sheet).length > 0;
+  if (isGrouped) {
+    updateGroupedAhspBlock_(sheet, record, ss);
+    SpreadsheetApp.flush();
+    verifyAhspUpdateSuccess_(sheet, code, record.components.length);
+  } else {
+    updateFlatAhspRows_(sheet, record, ss);
+    SpreadsheetApp.flush();
+  }
+}
+
+function updateFlatAhspRows_(sheet, record, ss) {
   const rows = objects_(sheet);
   const code = text_(record.code);
   const matches = [];
@@ -779,9 +807,6 @@ function updateAhsp_(record) {
     SpreadsheetApp.flush();
     verifyAhspReplacement_(sheet, insertedStart, insertedCount, code);
 
-    // Existing TOTAL PEKERJAAN is canonical metadata, not a direct-cost row.
-    // Preserve it during update and refresh its job metadata without creating
-    // a summary row for AHSP records that do not already have one.
     if (summaryMatches.length === 1) {
       const summaryRowNumber = summaryMatches[0];
       summarySnapshot = sheet.getRange(summaryRowNumber, 1, 1, headers.length).getValues()[0];
@@ -798,12 +823,6 @@ function updateAhsp_(record) {
       };
       updateObjectRow_(sheet, summaryRowNumber, updatedSummary);
       SpreadsheetApp.flush();
-      const verifiedSummary = objects_(sheet).find((row) => (
-        text_(row['KODE AHSP']) === code && text_(row['JENIS KOMPONEN']).toUpperCase() === 'TOTAL PEKERJAAN'
-      ));
-      if (!verifiedSummary || (text_(record.unit) && text_(verifiedSummary['SATUAN']) !== text_(record.unit))) {
-        throw new Error('Verifikasi metadata TOTAL PEKERJAAN gagal.');
-      }
     }
   } catch (err) {
     if (summarySnapshot && summaryMatches.length === 1) {
@@ -818,7 +837,101 @@ function updateAhsp_(record) {
   try {
     matches.sort((a, b) => b - a).forEach((rowNumber) => sheet.deleteRow(rowNumber));
   } catch (err) {
-    throw new Error('AHSP baru sudah ditulis lengkap, tetapi pembersihan baris lama gagal. Periksa duplikasi KODE AHSP ' + code + ': ' + message_(err));
+    throw new Error('AHSP baru sudah ditulis lengkap, tetapi pembersihan baris lama gagal: ' + message_(err));
+  }
+}
+
+function updateGroupedAhspBlock_(sheet, record, ss) {
+  const code = text_(record.code);
+  const range = sheet.getDataRange();
+  const values = range.getValues();
+  
+  let headerRowIndex = -1;
+  for (let i = 0; i < values.length; i++) {
+    if (text_(values[i][0]) === code && isAhspCode_(values[i][0])) {
+      headerRowIndex = i;
+      break;
+    }
+  }
+  if (headerRowIndex < 0) {
+    throwApi_('NOT_FOUND', 'KODE AHSP ' + code + ' untuk update tidak ditemukan.', { code: code }, 404);
+  }
+  
+  // Find where this job block ends
+  let endRowIndex = values.length;
+  for (let i = headerRowIndex + 2; i < values.length; i++) {
+    const a = text_(values[i][0]);
+    if (isAhspCode_(a) && a !== code) {
+      endRowIndex = i;
+      break;
+    }
+    if (!values[i].some((cell) => text_(cell))) {
+      endRowIndex = i;
+      break;
+    }
+  }
+  
+  const existingComponentRowCount = Math.max(0, endRowIndex - (headerRowIndex + 2));
+  
+  // Build lookup map from MASTER KOMPONEN to ensure 100% name consistency
+  const masterSheet = getRuntimeSheet_(ss, 'master');
+  const masterMap = {};
+  objects_(masterSheet).forEach((m) => {
+    const c = text_(m['KODE KOMPONEN']);
+    if (c) masterMap[c] = { name: text_(m['NAMA KOMPONEN INDUK']), unit: text_(m['SATUAN ACUAN']) };
+  });
+
+  const banner = [
+    code,
+    text_(record.name),
+    'Satuan: ' + (text_(record.unit) || 'm2'),
+    (text_(record.category) || 'ARSITEKTUR') + ' • Ref: ' + (text_(record.reference) || 'ANALISA STANDAR') + ' (' + (number_(record.year) || new Date().getFullYear()) + ')',
+    code
+  ];
+  const colHeader = ['JENIS KOMPONEN', 'URAIAN KOMPONEN', 'SATUAN', 'KOEFISIEN', 'KODE KOMPONEN'];
+  
+  const compRows = (record.components || []).map((comp) => {
+    const compCode = text_(comp.componentCode);
+    const master = masterMap[compCode] || {};
+    const compName = master.name || text_(comp.name);
+    const unit = master.unit || text_(comp.unit);
+    const type = normalizeType_(comp.type) || 'bahan';
+    const koef = formatCoefficient_(comp.coefficient);
+    return [type.toUpperCase(), compName, unit, koef, compCode];
+  });
+  
+  // Write banner and table header
+  sheet.getRange(headerRowIndex + 1, 1, 1, 5).setValues([banner]);
+  sheet.getRange(headerRowIndex + 2, 1, 1, 5).setValues([colHeader]);
+  
+  // Adjust rows if component count differs
+  const newCount = compRows.length;
+  if (newCount === existingComponentRowCount) {
+    if (newCount > 0) {
+      sheet.getRange(headerRowIndex + 3, 1, newCount, 5).setValues(compRows);
+    }
+  } else if (newCount > existingComponentRowCount) {
+    if (existingComponentRowCount > 0) {
+      sheet.getRange(headerRowIndex + 3, 1, existingComponentRowCount, 5).setValues(compRows.slice(0, existingComponentRowCount));
+    }
+    const extraRows = compRows.slice(existingComponentRowCount);
+    sheet.insertRowsAfter(headerRowIndex + 2 + existingComponentRowCount, extraRows.length);
+    sheet.getRange(headerRowIndex + 3 + existingComponentRowCount, 1, extraRows.length, 5).setValues(extraRows);
+  } else {
+    // newCount < existingComponentRowCount
+    if (newCount > 0) {
+      sheet.getRange(headerRowIndex + 3, 1, newCount, 5).setValues(compRows);
+    }
+    const excess = existingComponentRowCount - newCount;
+    sheet.deleteRows(headerRowIndex + 3 + newCount, excess);
+  }
+}
+
+function verifyAhspUpdateSuccess_(sheet, code, expectedCount) {
+  const allRows = groupedAhspObjects_(sheet).length ? groupedAhspObjects_(sheet) : objects_(sheet);
+  const rows = allRows.filter((row) => text_(row['KODE AHSP']) === code && normalizeType_(row['JENIS KOMPONEN']));
+  if (rows.length !== expectedCount) {
+    throwApi_('WRITE_VERIFY_FAILED', 'Verifikasi UPDATE AHSP gagal: jumlah detail komponen tidak sesuai.', { code: code, expected: expectedCount, actual: rows.length }, 500);
   }
 }
 

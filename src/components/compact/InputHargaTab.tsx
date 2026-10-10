@@ -478,7 +478,7 @@ export const InputHargaTab: React.FC = () => {
       ? 'Tambah Merek / Varian'
       : 'Buat Komponen Baru';
   const formModeDescription = formMode === 'edit_variant'
-    ? 'Ubah merek dan harga pada varian yang dipilih. Nama serta satuan induk mengikuti master komponen.'
+    ? 'Ubah nama material, merek, dan harga pada varian yang dipilih.'
     : formMode === 'add_variant'
       ? 'Isi merek baru dan harga daerah untuk komponen induk ini. Periksa kembali merek sebelum menyimpan.'
       : 'Isi komponen yang belum terdaftar beserta merek pertama dan harga daerah. Untuk merek lain dari komponen existing, gunakan Tambah Merek pada hasil pencarian.';
@@ -1010,7 +1010,6 @@ export const InputHargaTab: React.FC = () => {
               type="text"
               required
               value={componentName}
-              readOnly={formMode !== 'new_component'}
               aria-label="Nama komponen induk"
               onFocus={() => {
                 setIsComboboxOpen(false);
